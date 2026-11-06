@@ -1,61 +1,130 @@
-# Fernway Churn Spike — Analysis
+# Fernway Churn Spike Analysis
 
-## What happened
-The dashboard's "17% churn in June" is not accurate. Measured correctly —
-paid subscribers only (trial rows excluded, since they've never paid),
-and cancellations counted in the month access actually ended (`ended_at`),
-not the month the user clicked cancel (`cancelled_at`) — **June's real
-churn rate was ~9.1%** (962 of 10,604 active paid subscribers). Elevated
-versus the 3–5% baseline, but not the crisis the raw number suggested.
+## Project overview
+SQL and Python analysis of why Fernway's reported June 2026 churn jumped, and
+whether the list-price increase (₹399 to ₹449, effective 1 June) was the cause.
 
-## Was the price increase the cause?
-**No — the data rules this out.** If the ₹399 → ₹449 increase (effective
-1 June) were driving churn, every cohort renewing in June should show
-elevated churn, since all monthly subscribers hit the new price at their
-next billing cycle. Instead, churn by signup cohort shows:
+## Business problem
+The dashboard reported a 17% churn rate for June. Leadership was considering
+reversing the price increase on 1 September. The questions here:
 
-| Cohort | June churn rate |
+1. What was June churn once measured consistently?
+2. Which subscriber groups account for it?
+3. Does the data support blaming the price increase?
+
+## Dataset
+Three CSV files, expected in a `data/` folder (not included in this repository):
+
+| File | Columns used |
 |---|---|
-| Aug 2025 – Feb 2026 | 3.3% – 5.1% (normal) |
-| **March 2026** | **26.4%** |
-| April – May 2026 | 3.8% – 5.2% (normal) |
+| `subscriptions.csv` | `user_id`, `is_trial`, `started_at`, `ended_at`, `status`, `promo_code`, `price_inr` |
+| `users.csv` | `user_id`, `acquisition_channel` |
 
-Only the March cohort spiked. Every other cohort absorbed the same price
-increase without any unusual churn.
+`plans.csv` was loaded by the earlier version of the script but never used, so
+it is no longer read.
 
-## What actually happened
-The March 2026 cohort (2,409 subscribers, roughly 2x a normal month) was
-74% acquired through a `paid_social` campaign, largely on a **LAUNCH60**
-promo — 60% off, ₹160/month instead of ₹399. By June, 90 days later, the
-promo lapsed:
+## Metric definitions
+Python and SQL use the same rules.
 
-- LAUNCH60 promo users: **37.4%** churned
-- Non-promo March users: 12.1% churned
-- All other months' cohorts: 3–5% churned
+- **Unit:** one paid subscription row (`is_trial = 0`). Trials are excluded.
+- **Opening base for a month:** paid subscriptions that started before the first
+  day of the month and had not ended before it (`ended_at` empty or on/after that day).
+- **Churned:** a subscription in the opening base whose `ended_at` falls in the
+  month and whose `status` is `cancelled`.
+- **Churn rate:** churned / opening base. Churned is always a subset of the base.
+- **Cohort:** month of `started_at` on the paid subscription.
+- **Promo groups:** `LAUNCH60`, `Other promo` (any other non-empty code), `No promo`.
+  Codes are trimmed and upper-cased first. The groups do not overlap and cover every row.
 
-These users faced a jump from ₹160 to full price (₹449) — a ~180%
-increase — not the 12.5% general increase the team is worried about.
-This is a **promo-expiry cliff in a low-intent, paid-acquisition cohort**,
-not a reaction to the list price change.
+## Data preparation and quality checks
+Both scripts report these before any result:
 
-## Recommendation
-**Do not roll back the price on 1 September.** The general increase is
-not what's causing the spike — the rest of the base has absorbed it
-fine. Rolling it back would give up margin across the entire healthy
-subscriber base without fixing the actual problem.
+- exact duplicate rows (removed), and duplicate `user_id` values in `users`
+- `is_trial` values (only `0` is treated as paid, so unexpected values show up)
+- dates that are present but unparseable, and rows ending before they start
+- statuses of subscriptions that ended in June (only `cancelled` counts as churn)
 
-**Instead:**
-1. Build a step-down or targeted retention offer for promo cohorts
-   before LAUNCH60 (and similar codes) expire, rather than a hard cliff
-   to full price.
-2. Review the `paid_social` acquisition channel's cohort quality — a
-   channel that converts cheaply but churns at 3–7x baseline once the
-   discount ends is not paying for itself the way the headline signup
-   numbers suggest.
-3. Fix the dashboard's blended churn metric — it currently overstates
-   the problem by not separating trial expirations from paid
-   cancellations, and by using click-date instead of access-end-date.
+## SQL analysis
+`analysis.sql` (SQLite). Two temporary views, `paid_subs` and `june_base`, hold the
+cleaning and eligibility rules, so every query uses the same population. Queries:
+overall June churn, monthly churn trend, June churn by cohort, March channel mix,
+and March churn by promo group.
 
-## Files
-- `analysis.py` — Python analysis, reproduces every number above
-- `analysis.sql` — equivalent SQL queries
+## Python analysis
+`analysis.py` (pandas). It has the same sections as the SQL file. Each result table
+comes from one function, and the script asserts that cohort rows add up to the
+overall figure and that the promo groups cover the March cohort exactly once.
+
+## Key findings
+**Not yet verified.** The CSV files were not in the repository when the code was
+corrected, so the corrected scripts have not been run on the real data. The earlier
+README figures below were produced with the old logic and should not be quoted:
+
+- 9.1% overall June churn (962 / 10,604). The numerator also counted subscriptions
+  that started in June, which were not in the 1 June base.
+- 26.4% March cohort June churn.
+- 37.4% (LAUNCH60) vs 12.1% (non-promo). These used `status = 'cancelled'` at
+  extraction, which is not a June figure, and put other promo codes in neither or the wrong group.
+
+After running the scripts, replace this section with the printed values.
+
+## Interpretation guide
+What the output can and cannot show once it is run:
+
+- **Observed:** whether one cohort's June churn stands out, and whether churn
+  excluding LAUNCH60 subscriptions changed from earlier months.
+- **Possible explanation:** the March cohort was acquired with a 60% discount that
+  lapsed around June, at the same time as the list-price change. Both events hit
+  that group together, so their effects cannot be separated.
+- **Not supported:** claiming the price increase had no effect. Even if other
+  cohorts look stable, this is an observational comparison with no control group.
+
+## Recommendations
+Cautious, pending the verified numbers:
+
+1. Do not reverse the list price on the strength of this analysis alone. If the
+   non-promo base shows no change, there is no sign of a broad effect, but monitor
+   July and August churn before treating that as settled.
+2. Test a step-down or renewal offer for promo cohorts before the discount ends.
+3. Review retention by acquisition channel for the March cohort.
+4. Report churn with one documented definition on the dashboard.
+
+## Limitations
+- Extraction date and promo duration are not in the data, so promo expiry timing is inferred.
+- `price_inr` is stored per subscription, so it does not show what an existing
+  subscriber was charged after 1 June.
+- Plan type (monthly vs annual) is not separated, and annual subscribers do not renew in June.
+- Churn is counted per subscription, not per user.
+- Cohort start month assumes `started_at` is the paid start date.
+- Churn is limited to `cancelled`. Other end statuses are listed but not counted.
+
+## Repository structure
+```
+analysis.py     Python analysis
+analysis.sql    SQLite queries
+README.md
+data/           CSV files (add locally)
+```
+
+## Reproduce
+Requires Python 3.9+, pandas 2.0+ and any recent SQLite 3.
+
+```bash
+pip install "pandas>=2.0"
+python analysis.py
+```
+
+SQL, with the CSVs in `data/`:
+```bash
+sqlite3 fernway.db
+.mode csv
+.import data/subscriptions.csv subscriptions
+.import data/users.csv users
+.mode column
+.headers on
+.read analysis.sql
+```
+Empty CSV cells import as empty strings, not NULL. The SQL handles that.
+
+## Tools
+Python, pandas, SQLite.
